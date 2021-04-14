@@ -1,0 +1,319 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+//IR sensor
+int IRsensor=2; //pin 2 -> sensor
+int LED=12; //test output
+//Tap output
+int tap=4; //pin 4 -> Tap output
+
+//Interface
+LiquidCrystal_I2C lcd = LiquidCrystal_I2C(0x27, 20, 4); //default address ix 0x27
+//Water Level sensor
+int trigger=7; //pin7 -> trigger (output)
+int echo=8; //pin 8 -> echo (input)
+int CONTAINER_HEIGHT=21; //Height of container (safe full level relative to ground - container base relative to ground), ignore offset from ground 
+long duration; //time to transmit and receive 
+int distance; //distance output 
+int percentage; //percentage output
+//pH
+int pHSensor=A1; //pin A1 -> pHSensor 
+unsigned long int average; //average value of pH
+//NDP - Waterstep electronics Arduino code
+//Author: Anthony Yang
+//Language: C 
+//The code follows Google's programming standards (https://google.github.io/styleguide/cppguide.html)
+
+int data[10]; 
+int temp;
+float pH;
+//warning lights
+int red = 9; //red -> pin 9
+int yellow= 10; //yellow -> pin 10
+
+
+/*_________________________________________________________________________
+
+Initializes the GPIO pins and determines whether they are input or output. 
+_________________________________________________________________________*/
+
+
+void setup() {
+
+  //IR SENSOR setup
+  pinMode(IRsensor,INPUT); //set IRsensor to input
+  pinMode(LED,OUTPUT); //set LED to output
+  digitalWrite(LED,LOW);
+
+  //LCD SCREEN setup
+  lcd.init();
+  lcd.backlight();
+  
+  //Water level setup
+  pinMode(trigger,OUTPUT); //output signal
+  pinMode(echo,INPUT); //input signal
+
+  //Tap setup
+  pinMode(tap,OUTPUT); //set tap to output
+
+  //pH setup
+  pinMode(pHSensor,INPUT);
+
+  //warning lights setup
+  pinMode(red,OUTPUT);
+  pinMode(yellow,OUTPUT);
+
+  //Console
+  Serial.begin(9600);
+}
+
+/*_________________________________________________________________________
+
+Main function where functions are data are read. Loops infinitely for each clock cycle
+_________________________________________________________________________*/
+
+void loop() {
+  // put your main code here, to run repeatedly:
+  //int status = digitalRead(IRsensor); //read input
+  int water_level=read_water();
+  float pH=getpH();
+
+  if (digitalRead(IRsensor) == 0)
+  {
+    //Hand detected
+    delay(100);
+    digitalWrite(LED,HIGH); //LED ON
+    //Turn on TAP
+    digitalWrite(tap,HIGH);
+    screen_write(1,water_level,pH);
+  }
+  
+  if (digitalRead(IRsensor) == 1)
+  {
+    //No hand detected
+    digitalWrite(LED,LOW); //LED OFF
+    //Turn off TAP
+    digitalWrite(tap,LOW);
+    screen_write(0,water_level,pH);
+  }
+
+
+}
+
+/*_________________________________________________________________________//
+ Function screen_write: Write values to LCD screen
+//________________________________________________________________________*/
+
+void screen_write(int sensor,int water_level,float pH)
+{
+  //SENSOR
+  //char words[20] = "";
+  //char waterword[20] = "";
+  
+  if (sensor==1) //TRUE
+  {
+    lcd.setCursor(0,0); //First row, First character
+    lcd.print("                 "); //If we use clear(), the output will flicker due to it being called constantly in loop
+    lcd.setCursor(0,0);
+    lcd.print("1: Tap ON ");
+    //Serial.println("on");
+  }
+  else if (sensor == 0) //FALSE
+  {
+    lcd.setCursor(0,0);
+    lcd.print("                 "); //If we use clear(), the output will flicker due to it being called constantly in loop
+    lcd.setCursor(0,0);
+    lcd.print("0: Tap OFF");
+    //Serial.println("off");
+  }
+  else
+  {
+    Serial.println("error 1: wrong input for IR sensor");
+  }
+
+  
+  //WATER LEVEL
+  if (water_level > 0 && water_level < 100){
+    lcd.setCursor(0,1);
+    lcd.print("                    "); //If we use clear(), the output will flicker due to it being called constantly in loop
+    lcd.setCursor(0,1);
+    lcd.print("Water level: ");
+    lcd.print(percentage);
+    lcd.print("%");
+  }
+  else if (percentage == 100){
+    lcd.setCursor(0,1);
+    lcd.print("                             "); //If we use clear(), the output will flicker due to it being called constantly in loop
+    lcd.setCursor(0,1); 
+    lcd.print("Water level:");
+    lcd.print("FULL");
+  }
+  //else if (percentage == 0){
+  else{
+    lcd.setCursor(0,1);
+    lcd.print("                    ");  //If we use clear(), the output will flicker due to it being called constantly in loop
+    lcd.setCursor(0,1);
+    lcd.print("Water level: ");
+    lcd.print("LOW");
+    //while(read_water() == 0){   //Warning acts as an "interrupt", in which unless the water level goes up, we cannot leave this loop. 
+    //   warning();
+    //}
+  } 
+
+  
+  //pH 
+  lcd.setCursor(0,2);
+  lcd.print("                    "); //If we use clear(), the output will flicker due to it being called constantly in loop
+  lcd.setCursor(0,2);
+  lcd.print("pH: ");
+  lcd.print(pH,2);
+
+  //warning
+  if (pH < 6 || pH > 8){
+    lcd.setCursor(0,3);
+    lcd.print("Water unsafe!");
+    while(getpH() < 6 || getpH() > 8){
+       lcd.setCursor(0,2);
+       lcd.print("pH: ");
+       lcd.print(getpH(),2);
+       warning();
+    }
+  }
+  else{
+    lcd.setCursor(0,3);
+    lcd.print("                    "); 
+  }
+  
+  delay(1000);
+}
+
+
+
+//_________________________________________________________________________//
+// Function read_water: Calculates distance between the sensor and the water level (aka water level), and returns the water level in %
+//_________________________________________________________________________//
+
+int read_water(){
+//reset trigger pin 
+  digitalWrite(trigger,LOW);
+
+  //delayMicroseconds(2); //wait 5ms
+
+  //start trigger pin, send a pulse for 10ms
+  digitalWrite(trigger,HIGH);
+  delayMicroseconds(40); //wait 30ms 
+  digitalWrite(trigger,LOW); //turn off
+
+  //read the duration: Distance (cm) = Speed of sound (cm/µs) × Time (µs) / 2
+  duration = pulseIn(echo, HIGH);
+
+  //calculate distance
+  distance=duration * 0.034/2; //speed of sound in air is ~340m/s
+  distance= CONTAINER_HEIGHT - distance; //offset of the base of water (0cm should be the base)
+  percentage=((float)(distance) / CONTAINER_HEIGHT) * 100;
+
+  //provider cleaner data:
+  if (percentage >= 90)
+  {
+    percentage=100;
+  }
+  else if (percentage >= 75)
+  {
+    percentage=75;
+  }
+  else if (percentage >= 50)
+  {
+    percentage=50;
+  }
+  else if (percentage >= 25)
+  {
+    percentage=25;
+  }
+  else if (percentage >= 0)
+  {
+    percentage=0;
+  }
+  
+  return percentage;
+}
+
+
+//_________________________________________________________________________//
+// Function getpH: collects data samples of voltage converted pH, cleans it by taking moving average, and returns the cleaned pH value
+//_________________________________________________________________________//
+
+float getpH(){
+
+  int i;
+  int j;
+
+  for (i=0;i<10;i++){
+    data[i]=analogRead(pHSensor);
+    Serial.print(data[i]);
+    Serial.print("\n");
+    delay(10);
+  }
+
+  //get the data, sort it from smallest to largest 
+  for(i=0;i<9;i++)       
+  {
+    for(j=i+1;j<10;j++)
+    {
+      if(data[i]>data[j])
+      {
+        temp=data[i];
+        data[i]=data[j];
+        data[j]=temp;
+      }
+    }
+  }
+
+  //take average value of the middle 6 values
+  average=0;
+  for(int i=2;i<8;i++){
+    average+=data[i];                
+  }
+  average=average/6;
+
+  pH=((float)average-163.8)/34.6;  //pH = voltage * m + c 
+
+  if (pH > 14){
+    pH=14;
+  }
+  else if (pH < 0){
+    pH=0;
+  }
+
+  if (average > 385 && average < 430)
+  {
+    pH=7;  
+  }
+
+  return pH;
+}
+
+
+//_________________________________________________________________________//
+// Function warning: Toggles LEDs 
+//_________________________________________________________________________//
+
+void warning(){
+
+  analogWrite(red, 255);
+  delay(100);
+  analogWrite(red, 0);
+  delay(100);
+  analogWrite(red, 255);
+  delay(100);
+  analogWrite(red, 0);
+  delay(200);
+  analogWrite(yellow, 255);
+  delay(100);
+  analogWrite(yellow, 0);
+  delay(100);
+  analogWrite(yellow, 255);
+  delay(100);
+  analogWrite(yellow, 0);
+  delay(100);
+  
+}
